@@ -1,4 +1,5 @@
 import React, { ReactElement } from 'react'
+
 import {
   IRawResponse,
   ResponseMode,
@@ -7,6 +8,7 @@ import {
 import { Paragraph } from '@looker/components'
 
 import { CodeStructure } from './CodeStructure'
+import { DelimitedDataGrid } from './DataGrid'
 
 const ShowJSON = (response: IRawResponse) => (
   <CodeStructure
@@ -21,6 +23,20 @@ const ShowText = (response: IRawResponse) => (
     {response.body.toString()}
   </pre>
 )
+
+const ShowCSV = (response: IRawResponse) => {
+  return DelimitedDataGrid(response, ',')
+}
+
+const ShowTSV = (response: IRawResponse) => {
+  return DelimitedDataGrid(response, '\t')
+}
+
+const ShowMarkdown = (response: IRawResponse) => {
+  // TODO use ReactMarkdown with looker component bindings
+  // extract from DocMarkdown
+  return ShowText(response)
+}
 
 /**
  * Get image content from response
@@ -73,6 +89,28 @@ export const responseHandlers: Responder[] = [
     label: 'html',
     isRecognized: (contentType) => RegExp(/text\/html/g).test(contentType),
     component: (response) => ShowHTML(response),
+  },
+  {
+    label: 'csv',
+    isRecognized: (contentType) => RegExp(/text\/csv/g).test(contentType),
+    component: (response) => ShowCSV(response),
+  },
+  {
+    label: 'tsv',
+    isRecognized: (contentType) =>
+      RegExp(/text\/tab-separated-values/g).test(contentType),
+    component: (response) => ShowTSV(response),
+  },
+  {
+    label: 'pdf',
+    isRecognized: (contentType) =>
+      RegExp(/application\/pdf/g).test(contentType),
+    component: (response) => ShowImage(response),
+  },
+  {
+    label: 'markdown',
+    isRecognized: (contentType) => RegExp(/text\/markdown/g).test(contentType),
+    component: (response) => ShowMarkdown(response),
   },
   {
     label: 'text',
