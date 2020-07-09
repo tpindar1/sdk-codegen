@@ -26,7 +26,6 @@
 
 import {
   Arg,
-  EnumType,
   IMappedType,
   IMethod,
   IParameter,
@@ -37,6 +36,7 @@ import {
 import { CodeGen } from './codeGen'
 
 export class PythonGen extends CodeGen {
+  methodInputModelTypes: Set<IType> = new Set()
   codePath = './python/'
   packagePath = 'looker_sdk'
   itself = 'self'
@@ -49,13 +49,11 @@ export class PythonGen extends CodeGen {
   paramDelimiter = ',\n'
   propDelimiter = '\n'
   dataStructureDelimiter = ', '
-  enumDelimiter = '\n'
-  codeQuote = '"'
 
   endTypeStr = ''
 
   // keyword.kwlist
-  pythonKeywords = new Set<string>([
+  pythonKeywords = [
     'False',
     'None',
     'True',
@@ -91,7 +89,7 @@ export class PythonGen extends CodeGen {
     'while',
     'with',
     'yield',
-  ])
+  ]
 
   readonly pythonTypes: Record<string, IMappedType> = {
     any: { default: this.nullStr, name: 'Any' },
@@ -112,8 +110,7 @@ export class PythonGen extends CodeGen {
 
   // cattrs [un]structure hooks for model [de]serialization
   hooks: string[] = []
-  structureHookFR = 'forward_ref_structure_hook'
-  structureHookTK = 'translate_keys_structure_hook'
+  structureHook = 'structure_hook'
   pythonReservedKeywordClasses: Set<string> = new Set()
 
   methodsPrologue = (_indent: string) => `
@@ -134,13 +131,7 @@ class ${this.packageName}(api_methods.APIMethods):
   modelsPrologue = (_indent: string) => `
 # ${this.warnEditing()}
 import datetime
-import enum
 from typing import Any, MutableMapping, Optional, Sequence
-
-try:
-    from typing import ForwardRef  # type: ignore
-except ImportError:
-    from typing import _ForwardRef as ForwardRef  # type: ignore
 
 import attr
 
@@ -158,17 +149,15 @@ DelimSequence = model.DelimSequence
 # these calls will be removed.
 
 import functools  # noqa:E402
+from typing import Any
+try:
+    from typing import ForwardRef  # type: ignore
+except ImportError:
+    from typing import _ForwardRef as ForwardRef  # type: ignore
 
 ${
-  this.structureHookFR
-} = functools.partial(sr.forward_ref_structure_hook, globals(), sr.converter${
-    this.apiRef
-  })
-${
-  this.structureHookTK
-} = functools.partial(sr.translate_keys_structure_hook, sr.converter${
-    this.apiRef
-  })
+  this.structureHook
+} = functools.partial(sr.structure_hook, globals(), sr.converter${this.apiRef})
 ${this.hooks.join('\n')}
 `
 
@@ -191,30 +180,17 @@ ${this.hooks.join('\n')}
       : this.nullStr
   }
 
-  declareProperty(indent: string, property: IProperty, annotations = false) {
+  declareProperty(indent: string, property: IProperty) {
     const mappedType = this.typeMapModels(property.type)
     let propName = property.name
-    if (this.pythonKeywords.has(propName)) {
+    if (this.pythonKeywords.includes(propName)) {
       propName = propName + '_'
     }
     let propType = mappedType.name
     if (!property.required) {
-      propType = `Optional[${mappedType.name}]`
+      propType = `Optional[${mappedType.name}] = ${this.nullStr}`
     }
-
-    let propDef
-    if (annotations) {
-      let annotation = propType
-      if (this.isBareForwardRef(property)) {
-        annotation = `ForwardRef(${propType})`
-      }
-      propDef = `${this.bumper(indent)}"${propName}": ${annotation}`
-    } else {
-      if (!property.required) {
-        propType += ` = ${this.nullStr}`
-      }
-      propDef = `${indent}${propName}: ${propType}`
-    }
+    const propDef = `${indent}${propName}: ${propType}`
     return propDef
   }
 
@@ -257,10 +233,20 @@ ${this.hooks.join('\n')}
     )
   }
 
+  private addMethodInputModelType(type: IType) {
+    this.methodInputModelTypes.add(type)
+    for (const prop of Object.values(type.properties)) {
+      if (prop.type.elementType) {
+        this.addMethodInputModelType(prop.type.elementType)
+      }
+    }
+  }
+
   declareParameter(indent: string, method: IMethod, param: IParameter) {
     let type: IType
     if (param.location === strBody) {
       type = this.writeableType(param.type, method) || param.type
+      this.addMethodInputModelType(type)
     } else {
       type = param.type
     }
@@ -274,27 +260,7 @@ ${this.hooks.join('\n')}
   }
 
   initArg(indent: string, property: IProperty) {
-    let propName = property.name
-    if (this.pythonKeywords.has(propName)) {
-      propName = propName + '_'
-    }
-    return `${indent}self.${propName} = ${propName}`
-  }
-
-  typeProperties(type: IType) {
-    return Object.values(type.requiredProperties).concat(
-      Object.values(type.optionalProperties)
-    )
-  }
-
-  private isBareForwardRef = (prop: IProperty) => {
-    // contains a "bare" forward reference e.g. `result_format: "ResultFormat"`
-    // so we need to emit the `__annotations__` property
-    return (
-      prop.required &&
-      (prop.type.customType || prop.type instanceof EnumType) &&
-      !['ArrayType', 'HashType', 'DelimArrayType'].includes(prop.type.className)
-    )
+    return `${indent}self.${property.name} = ${property.name}`
   }
 
   /**
@@ -307,28 +273,18 @@ ${this.hooks.join('\n')}
    * @attr.s(kw_only=True) we'll only allow kw_args.
    */
   construct(indent: string, type: IType) {
-    if (type instanceof EnumType) return ''
+    // Skip read-only parameters
+    if (!this.methodInputModelTypes.has(type)) return ''
     indent = this.bumper(indent)
     const bump = this.bumper(indent)
-    const annotations: string[] = []
+    let result = `\n\n${indent}def __init__(self, *${this.argDelimiter}`
     const args: string[] = []
     const inits: string[] = []
-    this.typeProperties(type).forEach((prop) => {
-      annotations.push(this.declareProperty(indent, prop, true))
+    Object.values(type.properties).forEach((prop) => {
       args.push(this.declareConstructorArg('', prop))
       inits.push(this.initArg(bump, prop))
     })
-    let result = ''
-    if (Object.values(type.properties).some(this.isBareForwardRef)) {
-      result =
-        `\n${indent}__annotations__ = {\n` +
-        `${annotations.join(',\n')}` +
-        `\n${indent}}`
-    }
-    result +=
-      `\n\n${indent}def __init__(self, *${this.argDelimiter}` +
-      `${args.join(this.argDelimiter)}):\n` +
-      inits.join('\n')
+    result += `${args.join(this.argDelimiter)}):\n` + inits.join('\n')
     return result
   }
 
@@ -340,11 +296,7 @@ ${this.hooks.join('\n')}
     } else {
       propType = `Optional[${mappedType.name}] = ${this.nullStr}`
     }
-    let propName = property.name
-    if (this.pythonKeywords.has(propName)) {
-      propName = propName + '_'
-    }
-    return `${indent}${propName}: ${propType}`
+    return `${indent}${property.name}: ${propType}`
   }
 
   // this is a builder function to produce arguments with optional null place holders but no extra required optional arguments
@@ -484,47 +436,44 @@ ${this.hooks.join('\n')}
     const bump = this.bumper(indent)
     const b2 = this.bumper(bump)
     const attrs: string[] = []
-    const isEnum = type instanceof EnumType
-    const baseClass = isEnum ? 'enum.Enum' : 'model.Model'
     let usesReservedPythonKeyword = false
-
-    if (!isEnum) {
-      for (const prop of this.typeProperties(type)) {
-        let propName = prop.name
-        if (this.pythonKeywords.has(propName)) {
-          propName = propName + '_'
-          usesReservedPythonKeyword = true
-        }
-        let attr = `${b2}${propName}:`
-        if (prop.description) {
-          attr += ` ${prop.description}`
-        }
-        attrs.push(attr)
+    for (const prop of Object.values(type.properties)) {
+      let propName = prop.name
+      if (this.pythonKeywords.includes(propName)) {
+        propName = propName + '_'
+        usesReservedPythonKeyword = true
       }
+      let attr = `${b2}${propName}:`
+      if (prop.description) {
+        attr += ` ${prop.description}`
+      }
+      attrs.push(attr)
+    }
+
+    let attrsArgs = 'auto_attribs=True, kw_only=True'
+    if (this.methodInputModelTypes.has(type)) {
+      attrsArgs += ', init=False'
     }
 
     const forwardRef = `ForwardRef("${type.name}")`
     this.hooks.push(
-      `sr.converter${this.apiRef}.register_structure_hook(\n${bump}${forwardRef},  # type: ignore\n${bump}${this.structureHookFR}  # type:ignore\n)`
+      `sr.converter${this.apiRef}.register_structure_hook(\n${bump}${forwardRef},  # type: ignore\n${bump}${this.structureHook}  # type:ignore\n)`
     )
     if (usesReservedPythonKeyword) {
       this.hooks.push(
-        `sr.converter${this.apiRef}.register_structure_hook(\n${bump}${type.name},  # type: ignore\n${bump}${this.structureHookTK}  # type:ignore\n)`
+        `sr.converter${this.apiRef}.register_structure_hook(\n${bump}${type.name},  # type: ignore\n${bump}${this.structureHook}  # type:ignore\n)`
       )
     }
-
-    let result =
+    return (
       `\n` +
-      (isEnum ? '' : `${indent}@attr.s(auto_attribs=True, init=False)\n`) +
-      `${indent}class ${type.name}(${baseClass}):\n` +
+      `${indent}@attr.s(${attrsArgs})\n` +
+      `${indent}class ${type.name}(model.Model):\n` +
       `${bump}"""\n` +
-      (type.description ? `${bump}${type.description}\n\n` : '')
-
-    if (attrs.length > 0) {
-      result += `${bump}Attributes:\n` + `${attrs.join('\n')}\n`
-    }
-
-    return result + `${bump}"""\n`
+      (type.description ? `${bump}${type.description}\n\n` : '') +
+      `${bump}Attributes:\n` +
+      `${attrs.join('\n')}\n` +
+      `${bump}"""\n`
+    )
   }
 
   summary(indent: string, text: string | undefined) {
@@ -550,8 +499,6 @@ ${this.hooks.join('\n')}
             default: this.nullStr,
             name: `models.DelimSequence[${map.name}]`,
           }
-        case 'EnumType':
-          return { default: '', name: `"${type.name}"` }
       }
       throw new Error(`Don't know how to handle: ${JSON.stringify(type)}`)
     }
