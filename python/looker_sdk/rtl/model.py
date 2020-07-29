@@ -24,18 +24,35 @@
 """
 
 import collections
-from typing import Any, cast, Iterable, Sequence, Optional, TypeVar
+from typing import Any, cast, Generic, Iterable, Sequence, Optional, TypeVar
 
 
 EXPLICIT_NULL = cast(Any, "EXPLICIT_NULL")  # type:ignore
 
 
-class Model:
+T = TypeVar("T")
+
+
+class Model(Generic[T], collections.MutableMapping):
     """Base model for all generated models.
     """
 
+    sdk_model_data: T
 
-T = TypeVar("T")
+    def __getitem__(self, item):
+        return self.sdk_model_data[item]
+
+    def __setitem__(self, item, value):
+        self.sdk_model_data[item] = value
+
+    def __delitem__(self, item):
+        del self.sdk_model_data[item]
+
+    def __iter__(self):
+        return self.sdk_model_data
+
+    def __len__(self):
+        return len(self.sdk_model_data)
 
 
 class DelimSequence(collections.UserList, Sequence[T]):
